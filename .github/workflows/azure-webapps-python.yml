@@ -8,9 +8,9 @@ on:
 env:
   BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
   PR_NUMBER: ${{ github.event.pull_request.number }}
-  AZURE_WEBAPP_NAME: test-${{ github.event.pull_request.number }}
+  AZURE_WEBAPP_NAME: testsb-${{ github.event.pull_request.number }}
   AZURE_WEBAPP_PACKAGE_PATH: '.'
-  RESOURCE_GROUP: test-${{ github.event.pull_request.number }}
+  RESOURCE_GROUP: testsb-${{ github.event.pull_request.number }}
   PYTHON_VERSION: '3.11' # set this to the Python version to use
 permissions:
   contents: read
@@ -154,29 +154,6 @@ jobs:
           startup-command: 'python main.py'
 
 
-
-      # find comment
-      - name: Find comment Deployed
-        uses: peter-evans/find-comment@v2
-        id: deploy-preview-comment
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-author: 'github-actions[bot]'
-          body-includes: 'The Pull Request preview is being updated.'
-
-        # Update Comment on PR with deployment URL
-      - name: 'Comment on PR with deployment URL'
-        uses: peter-evans/create-or-update-comment@v2.1.0
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-id: ${{ steps.deploy-preview-comment.outputs.comment-id }}
-          edit-mode: replace
-          body: |
-            🚀 A preview of this Pull Request is ready. Click the link below to view it. 
-             ${{ steps.deploy-to-webapp.outputs.webapp-url }}
-             Commit ID: ${{ github.event.pull_request.head.sha }}
-          reactions: rocket
-
       # Deploy the zip file to the deployment slot
   deploy-update:
     if: github.event.action == 'synchronize'
@@ -187,28 +164,6 @@ jobs:
       url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
 
     steps:
-      # find comment
-      - name: Find comment Deployed
-        uses: peter-evans/find-comment@v2
-        id: deploy-preview-comment-update
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-author: 'github-actions[bot]'
-          body-includes: '🚀 A preview of this Pull Request is ready.'
-
-        # Update Comment on PR with deployment URL
-      - name: Update PR Preview Comment
-        if: steps.deploy-preview-comment.outputs.comment-id != 0
-        uses: peter-evans/create-or-update-comment@v2.1.0
-        with:
-          comment-id: ${{ steps.deploy-preview-comment-update.outputs.comment-id }}
-          edit-mode: replace
-          body: |
-            The Pull Request preview is being updated. Hold tight while it's building ⚒️
-            This comment will be automatically updated when the new version is ready.
-          reactions: hooray
-
-
       - name: Login via Azure CLI
         uses: azure/login@v1
         with:
@@ -221,10 +176,6 @@ jobs:
           name: python-app
           path: .
 
-      - name: Verify downloaded files before deployment
-        run: |
-          ls -la
-          cat config.toml
 
       - name: Azure App Service Settings
         uses: Azure/appservice-settings@v1
@@ -252,29 +203,6 @@ jobs:
           startup-command: 'python main.py'
 
 
-      # find comment
-      - name: Find comment Deployed
-        uses: peter-evans/find-comment@v2
-        id: initial-deploy-preview-comment
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-author: 'github-actions[bot]'
-          body-includes: 'The Pull Request preview is being updated.'
-
-      # Update comment on PR with deployment URL
-      - name: Update PR Preview Comment
-        uses: peter-evans/create-or-update-comment@v2.1.0
-        with:
-          comment-id: ${{ steps.initial-deploy-preview-comment.outputs.comment-id }}
-          edit-mode: replace
-          body: |
-            🚀 A preview of this Pull Request is ready. Click the link below to view it.
-             ${{ steps.deploy-to-webapp.outputs.webapp-url }}
-             Commit ID: ${{ github.event.pull_request.head.sha }}
-          reactions: rocket
-
-
-
       # Delete Resources once PR is closed
   cleanup-resources:
     if: github.event.action == 'closed'
@@ -295,23 +223,4 @@ jobs:
         with:
           inlineScript: |
             az group delete --name ${{ env.RESOURCE_GROUP }} --no-wait --yes
-
-      # find previous comment
-      - name: Find comment Deployed
-        uses: peter-evans/find-comment@v2
-        id: deploy-preview-comment
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-author: 'github-actions[bot]'
-          body-includes: '🚀 A preview of this Pull Request is ready.'
-
-      # Update found comment with new content
-      - name: Delete Comment
-        if: steps.deploy-preview-comment.outputs.comment-id != 0
-        uses: peter-evans/create-or-update-comment@v2.1.0
-        with:
-          comment-id: ${{ steps.deploy-preview-comment.outputs.comment-id }}
-          edit-mode: replace
-          body: |
-            🏁 The preview of this Pull Request has been deleted.
 
