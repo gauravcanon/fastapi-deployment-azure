@@ -221,10 +221,6 @@ jobs:
           name: python-app
           path: .
 
-      - name: Verify downloaded files before deployment
-        run: |
-          ls -la
-          cat config.toml
 
       - name: Azure App Service Settings
         uses: Azure/appservice-settings@v1
