@@ -1,0 +1,317 @@
+name: Build and deploy Python API to Azure Web App
+on:
+  pull_request:
+    branches: [ "main","develop","feature/*" ]
+    types: [ opened, synchronize, closed , reopened ]
+  workflow_dispatch:
+
+env:
+  BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+  AZURE_WEBAPP_NAME: test-${{ github.event.pull_request.number }}
+  AZURE_WEBAPP_PACKAGE_PATH: '.'
+  RESOURCE_GROUP: test-${{ github.event.pull_request.number }}
+  PYTHON_VERSION: '3.11' # set this to the Python version to use
+permissions:
+  contents: read
+  pull-requests: write
+  actions: write
+
+jobs:
+  pre-build:
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    name: Pre-build checks
+    steps:
+      - uses: actions/checkout@v3
+      - name: Login via Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Create new resource group for the web app if not exist
+      - name: Create resource group
+        uses: azure/cli@v1
+        with:
+          inlineScript: |
+            az group list --query "[?name=='$RESOURCE_GROUP']" --output tsv
+            if [ $? -ne 0 ]; then
+              echo "Resource group already exist"
+            else
+              echo "Creating resource group"
+              az group create --name ${{ env.RESOURCE_GROUP }} --location "Central India"
+            fi
+
+      #      # Create an App Service Plan for the web app if not exist
+      - name: Create App service plan
+        uses: Azure/cli@v1
+        with:
+          inlineScript: |
+            az appservice plan list --query "[?name=='${{ env.AZURE_WEBAPP_NAME }}']" --output tsv
+            if [ $? -ne 0 ]; then
+              echo "App service plan already exist"
+            else
+              echo "Creating App service plan"
+              az appservice plan create --name ${{ env.AZURE_WEBAPP_NAME }}-plan --resource-group ${{ env.RESOURCE_GROUP }} --sku B1 --is-linux
+            fi
+
+      # Set the deployment slot's app setting to point to the staging slot
+      - name: Create Web App
+        uses: Azure/cli@v1
+        with:
+          inlineScript: | # if web app not exit then only create
+            az webapp list --query "[?name=='${{ env.AZURE_WEBAPP_NAME }}']" --output tsv
+            if [ $? -ne 0 ]; then
+              echo "Web app already exist"
+            else
+              echo "Creating Web app"
+              az webapp create --resource-group ${{ env.RESOURCE_GROUP }} --plan ${{ env.AZURE_WEBAPP_NAME }}-plan --name ${{ env.AZURE_WEBAPP_NAME }}-${{ env.PR_NUMBER }} --runtime "PYTHON:3.11" 
+            fi
+
+  build:
+    runs-on: ubuntu-latest
+    needs: pre-build # wait for pre-build to finish
+    steps:
+      - uses: actions/checkout@v3
+      - name: Create and start virtual environment
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+
+      - name: Verify directory structure after checkout
+        run: |
+          ls -la
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v3
+        with:
+          name: python-app
+          path: |
+            .
+            !.github/
+            !venv/
+            !.git/
+            !docs/
+            !tests/
+            !static/
+
+  deploy:
+    # Run this job if pr is opened or reopened
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened')
+    permissions:
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    needs: build # wait for build to finish
+    environment:
+      name: 'Development'
+      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+
+    steps:
+
+      - name: Login via Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v3
+        with:
+          name: python-app
+          path: .
+
+      - name: Verify downloaded files before deployment
+        run: |
+          ls -la
+
+      - name: Azure App Service Settings
+        uses: Azure/appservice-settings@v1
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}-${{ env.PR_NUMBER }}
+          app-settings-json: |
+            [
+              {
+                "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+                "value": "true"
+              }
+            ]
+
+      - name: 'Enable HTTPS only'
+        uses: Azure/cli@v1
+        with:
+          inlineScript: |
+            az webapp update --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.AZURE_WEBAPP_NAME }}-${{ env.PR_NUMBER }} --set httpsOnly=true
+
+      - name: 'Deploy to Azure WebApp'
+        id: deploy-to-webapp
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}-${{ env.PR_NUMBER }}
+          startup-command: 'python main.py'
+
+
+
+      # find comment
+      - name: Find comment Deployed
+        uses: peter-evans/find-comment@v2
+        id: deploy-preview-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: 'The Pull Request preview is being updated.'
+
+        # Update Comment on PR with deployment URL
+      - name: 'Comment on PR with deployment URL'
+        uses: peter-evans/create-or-update-comment@v2.1.0
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-id: ${{ steps.deploy-preview-comment.outputs.comment-id }}
+          edit-mode: replace
+          body: |
+            🚀 A preview of this Pull Request is ready. Click the link below to view it. 
+             ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+             Commit ID: ${{ github.event.pull_request.head.sha }}
+          reactions: rocket
+
+      # Deploy the zip file to the deployment slot
+  deploy-update:
+    if: github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: 'Development'
+      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+
+    steps:
+      # find comment
+      - name: Find comment Deployed
+        uses: peter-evans/find-comment@v2
+        id: deploy-preview-comment-update
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '🚀 A preview of this Pull Request is ready.'
+
+        # Update Comment on PR with deployment URL
+      - name: Update PR Preview Comment
+        if: steps.deploy-preview-comment.outputs.comment-id != 0
+        uses: peter-evans/create-or-update-comment@v2.1.0
+        with:
+          comment-id: ${{ steps.deploy-preview-comment-update.outputs.comment-id }}
+          edit-mode: replace
+          body: |
+            The Pull Request preview is being updated. Hold tight while it's building ⚒️
+            This comment will be automatically updated when the new version is ready.
+          reactions: hooray
+
+
+      - name: Login via Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v3
+        with:
+          name: python-app
+          path: .
+
+      - name: Verify downloaded files before deployment
+        run: |
+          ls -la
+          cat config.toml
+
+      - name: Azure App Service Settings
+        uses: Azure/appservice-settings@v1
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}-${{ env.PR_NUMBER }}
+          app-settings-json: |
+            [
+              {
+                "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+                "value": "true"
+              }
+            ]
+
+      - name: 'Enable HTTPS only'
+        uses: Azure/cli@v1
+        with:
+          inlineScript: |
+            az webapp update --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.AZURE_WEBAPP_NAME }}-${{ env.PR_NUMBER }} --set httpsOnly=true
+
+      - name: 'Deploy to Azure WebApp'
+        id: deploy-to-webapp
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}-${{ env.PR_NUMBER }}
+          startup-command: 'python main.py'
+
+
+      # find comment
+      - name: Find comment Deployed
+        uses: peter-evans/find-comment@v2
+        id: initial-deploy-preview-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: 'The Pull Request preview is being updated.'
+
+      # Update comment on PR with deployment URL
+      - name: Update PR Preview Comment
+        uses: peter-evans/create-or-update-comment@v2.1.0
+        with:
+          comment-id: ${{ steps.initial-deploy-preview-comment.outputs.comment-id }}
+          edit-mode: replace
+          body: |
+            🚀 A preview of this Pull Request is ready. Click the link below to view it.
+             ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+             Commit ID: ${{ github.event.pull_request.head.sha }}
+          reactions: rocket
+
+
+
+      # Delete Resources once PR is closed
+  cleanup-resources:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    environment:
+      name: 'Development'
+      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+
+    steps:
+      - name: Login via Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Delete resource group and webapp
+      - name: Delete Resource Group
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            az group delete --name ${{ env.RESOURCE_GROUP }} --no-wait --yes
+
+      # find previous comment
+      - name: Find comment Deployed
+        uses: peter-evans/find-comment@v2
+        id: deploy-preview-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '🚀 A preview of this Pull Request is ready.'
+
+      # Update found comment with new content
+      - name: Delete Comment
+        if: steps.deploy-preview-comment.outputs.comment-id != 0
+        uses: peter-evans/create-or-update-comment@v2.1.0
+        with:
+          comment-id: ${{ steps.deploy-preview-comment.outputs.comment-id }}
+          edit-mode: replace
+          body: |
+            🏁 The preview of this Pull Request has been deleted.
+
