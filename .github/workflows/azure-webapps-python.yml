@@ -156,7 +156,7 @@ jobs:
 
       # Deploy the zip file to the deployment slot
   deploy-update:
-    if: github.event.action == 'synchronize'
+    if: github.event_name == 'pull_request' && github.event.action == 'synchronize'
     runs-on: ubuntu-latest
     needs: build
     environment:
