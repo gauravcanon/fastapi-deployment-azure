@@ -1,11 +1,16 @@
 from typing import Union
 import uvicorn
+import pathlib
 from fastapi import FastAPI
 
 app = FastAPI()
 
 
-# Add uvicorn start command
+# use pathlib to get the parent directory of the current file
+
+@app.get("/files/{file_path:path}")
+def read_file(file_path: pathlib.Path):
+    return {"file_path": file_path}
 
 
 @app.get("/")
@@ -31,4 +36,3 @@ if __name__ == "__main__":
                 proxy_headers=True,
                 forwarded_allow_ips="*",
                 )
-
